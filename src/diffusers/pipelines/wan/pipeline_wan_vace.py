@@ -521,11 +521,11 @@ class WanVACEPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                     f"Batch size of `video` {video.shape[0]} and length of `reference_images` {len(reference_images)} does not match."
                 )
 
-        if video.shape[0] != 1:
-            # TODO: support this
-            raise ValueError(
-                "Generating with more than one video is not yet supported. This may be supported in the future."
-            )
+        # if video.shape[0] != 1:
+        #     # TODO: support this
+        #     raise ValueError(
+        #         "Generating with more than one video is not yet supported. This may be supported in the future."
+        #     )
 
         vae_dtype = self.vae.dtype
         video = video.to(dtype=vae_dtype)
