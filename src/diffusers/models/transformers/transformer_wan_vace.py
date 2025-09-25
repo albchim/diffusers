@@ -292,6 +292,9 @@ class WanVACETransformer3DModel(
         post_patch_num_frames = num_frames // p_t
         post_patch_height = height // p_h
         post_patch_width = width // p_w
+        
+        if len(control_hidden_states.shape) < 6:
+            control_hidden_states = control_hidden_states[None]
 
         if control_hidden_states_scale is None:
             control_hidden_states_scale = control_hidden_states.new_ones(len(self.config.vace_layers))
@@ -309,12 +312,16 @@ class WanVACETransformer3DModel(
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
 
-        control_hidden_states = self.vace_patch_embedding(control_hidden_states)
-        control_hidden_states = control_hidden_states.flatten(2).transpose(1, 2)
-        control_hidden_states_padding = control_hidden_states.new_zeros(
-            batch_size, hidden_states.size(1) - control_hidden_states.size(1), control_hidden_states.size(2)
-        )
-        control_hidden_states = torch.cat([control_hidden_states, control_hidden_states_padding], dim=1)
+        patched_states = []
+        for control_state in enumerate(control_hidden_states):
+            control_state = self.vace_patch_embedding(control_state)
+            control_state = control_state.flatten(2).transpose(1, 2)
+            control_state_padding = control_state.new_zeros(
+                batch_size, hidden_states.size(1) - control_state.size(1), control_state.size(2)
+            )
+            control_state = torch.cat([control_state, control_state_padding], dim=1)
+            patched_states.append(control_state[None])
+        control_hidden_states = torch.cat(patched_states, dim=0)
 
         # 3. Time embedding
         temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
@@ -331,10 +338,13 @@ class WanVACETransformer3DModel(
             # Prepare VACE hints
             control_hidden_states_list = []
             for i, block in enumerate(self.vace_blocks):
-                conditioning_states, control_hidden_states = self._gradient_checkpointing_func(
-                    block, hidden_states, encoder_hidden_states, control_hidden_states, timestep_proj, rotary_emb
-                )
-                control_hidden_states_list.append((conditioning_states, control_hidden_states_scale[i]))
+                conditioning_states = []
+                for idx, control_state in enumerate(control_hidden_states):
+                    states, control_hidden_states[idx] = self._gradient_checkpointing_func(
+                        block, hidden_states, encoder_hidden_states, control_state, timestep_proj, rotary_emb
+                    )
+                    conditioning_states.append((states, control_hidden_states_scale[i]))
+                control_hidden_states_list.append(conditioning_states)
             control_hidden_states_list = control_hidden_states_list[::-1]
 
             for i, block in enumerate(self.blocks):
@@ -342,23 +352,28 @@ class WanVACETransformer3DModel(
                     block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb
                 )
                 if i in self.config.vace_layers:
-                    control_hint, scale = control_hidden_states_list.pop()
-                    hidden_states = hidden_states + control_hint * scale
+                    conditioning_state = control_hidden_states_list.pop()
+                    for control_hint, scale in conditioning_state:
+                        hidden_states = hidden_states + control_hint * scale
         else:
             # Prepare VACE hints
             control_hidden_states_list = []
             for i, block in enumerate(self.vace_blocks):
-                conditioning_states, control_hidden_states = block(
-                    hidden_states, encoder_hidden_states, control_hidden_states, timestep_proj, rotary_emb
-                )
-                control_hidden_states_list.append((conditioning_states, control_hidden_states_scale[i]))
+                conditioning_states = []
+                for idx, control_state in enumerate(control_hidden_states):
+                    states, control_hidden_states[idx] = block(
+                        hidden_states, encoder_hidden_states, control_state, timestep_proj, rotary_emb
+                    )
+                    conditioning_states.append((states, control_hidden_states_scale[i]))
+                control_hidden_states_list.append(conditioning_states)
             control_hidden_states_list = control_hidden_states_list[::-1]
 
             for i, block in enumerate(self.blocks):
                 hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb)
                 if i in self.config.vace_layers:
-                    control_hint, scale = control_hidden_states_list.pop()
-                    hidden_states = hidden_states + control_hint * scale
+                    conditioning_state = control_hidden_states_list.pop()
+                    for control_hint, scale in conditioning_state:
+                        hidden_states = hidden_states + control_hint * scale
 
         # 6. Output norm, projection & unpatchify
         shift, scale = (self.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)
