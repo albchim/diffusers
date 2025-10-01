@@ -598,7 +598,8 @@ class WanVACEPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 latent_list.append(latent)
             all_latents.append(torch.stack(latent_list)[None])
         
-        return torch.cat(all_latents, dim=0)
+        all_latents = torch.cat(all_latents, dim=0)
+        return all_latents
 
     def prepare_masks(
         self,
@@ -713,6 +714,7 @@ class WanVACEPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         additional_masks: Optional[List[List[PipelineImageInput]]] = None,
         reference_images: Optional[List[PipelineImageInput]] = None,
         conditioning_scale: Union[float, List[float], torch.Tensor] = 1.0,
+        additional_conditioning_scale: Union[List[float], List[List[float]], torch.Tensor] = None,
         height: int = 480,
         width: int = 832,
         num_frames: int = 81,
@@ -772,6 +774,11 @@ class WanVACEPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 denoising latent stream in each control layer of the model. If a float is provided, it will be applied
                 uniformly to all layers. If a list or tensor is provided, it should have the same length as the number
                 of control layers in the model (`len(transformer.config.vace_layers)`).
+            additional_conditioning_scale (List[`float`], `List[List[float]]`, `torch.Tensor`, defaults to `None`):
+                The conditioning scales to be applied to the additional conditioning videos, if provided. 
+                If a list of floats is provided, it will be applied uniformly to all layers. 
+                If a tensor is provided, it should have the same length as the number of additional control videos provided
+                by the number of control layers in the model (`len(additional_videos) x len(transformer.config.vace_layers)`).
             height (`int`, defaults to `480`):
                 The height in pixels of the generated image.
             width (`int`, defaults to `832`):
@@ -904,6 +911,36 @@ class WanVACEPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                     f"Length of `conditioning_scale` {conditioning_scale.size(0)} does not match number of layers {len(self.transformer.config.vace_layers)}."
                 )
             conditioning_scale = conditioning_scale.to(device=device, dtype=transformer_dtype)
+            
+        if additional_videos is not None:
+            if additional_conditioning_scale is not None:
+                if len(additional_conditioning_scale) != len(additional_videos):
+                    raise ValueError(
+                        "The provided `additional_conditioning_scale` length does not match the provided `additional_videos`"
+                    )
+                processed_scale = []
+                for scale in additional_conditioning_scale:
+                    if isinstance(scale, (int, float)):
+                        scale = [scale] * len(self.transformer.config.vace_layers)
+                    if isinstance(scale, list):
+                        if len(scale) != len(self.transformer.config.vace_layers):
+                            raise ValueError(
+                                f"Length of `additional_conditioning_scale` {len(scale)} does not match number of layers {len(self.transformer.config.vace_layers)}."
+                            )
+                        scale = torch.tensor(scale)
+                    if isinstance(scale, torch.Tensor):
+                        if scale.size(0) != len(self.transformer.config.vace_layers):
+                            raise ValueError(
+                                f"Length of `additional_conditioning_scale` {scale.size(0)} does not match number of layers {len(self.transformer.config.vace_layers)}."
+                            )
+                        scale = scale.to(device=device, dtype=transformer_dtype)
+                    processed_scale.append(scale[None])
+                if video is not None:
+                    conditioning_scale = torch.cat([conditioning_scale[None], torch.cat(processed_scale, dim=0)], dim=0)
+                else:
+                    conditioning_scale = torch.cat(processed_scale, dim=0)
+            else:
+                conditioning_scale = torch.cat([conditioning_scale[None] for _ in range(len(additional_videos) + int(video is not None))], dim=0)
 
         # 3. Encode input prompt
         prompt_embeds, negative_prompt_embeds = self.encode_prompt(

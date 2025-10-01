@@ -297,9 +297,11 @@ class WanVACETransformer3DModel(
             control_hidden_states = control_hidden_states[None]
 
         if control_hidden_states_scale is None:
-            control_hidden_states_scale = control_hidden_states.new_ones(len(self.config.vace_layers))
-        control_hidden_states_scale = torch.unbind(control_hidden_states_scale)
-        if len(control_hidden_states_scale) != len(self.config.vace_layers):
+            control_hidden_states_scale = control_hidden_states.new_ones((control_hidden_states.shape[0], len(self.config.vace_layers)))
+        elif len(control_hidden_states_scale.shape) < 2:
+            control_hidden_states_scale = control_hidden_states_scale[None]
+        control_hidden_states_scale = torch.unbind(control_hidden_states_scale, dim=0)
+        if any([len(states_scale) != len(self.config.vace_layers) for states_scale in control_hidden_states_scale]):
             raise ValueError(
                 f"Length of `control_hidden_states_scale` {len(control_hidden_states_scale)} should be "
                 f"equal to {len(self.config.vace_layers)}."
@@ -313,7 +315,7 @@ class WanVACETransformer3DModel(
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
 
         patched_states = []
-        for control_state in enumerate(control_hidden_states):
+        for control_state in control_hidden_states:
             control_state = self.vace_patch_embedding(control_state)
             control_state = control_state.flatten(2).transpose(1, 2)
             control_state_padding = control_state.new_zeros(
@@ -343,7 +345,7 @@ class WanVACETransformer3DModel(
                     states, control_hidden_states[idx] = self._gradient_checkpointing_func(
                         block, hidden_states, encoder_hidden_states, control_state, timestep_proj, rotary_emb
                     )
-                    conditioning_states.append((states, control_hidden_states_scale[i]))
+                    conditioning_states.append((states, control_hidden_states_scale[idx][i]))
                 control_hidden_states_list.append(conditioning_states)
             control_hidden_states_list = control_hidden_states_list[::-1]
 
@@ -364,7 +366,7 @@ class WanVACETransformer3DModel(
                     states, control_hidden_states[idx] = block(
                         hidden_states, encoder_hidden_states, control_state, timestep_proj, rotary_emb
                     )
-                    conditioning_states.append((states, control_hidden_states_scale[i]))
+                    conditioning_states.append((states, control_hidden_states_scale[idx][i]))
                 control_hidden_states_list.append(conditioning_states)
             control_hidden_states_list = control_hidden_states_list[::-1]
 
